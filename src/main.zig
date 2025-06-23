@@ -8,6 +8,16 @@ pub fn splitPath(path: []const u8) std.mem.SplitIterator(u8, .scalar) {
     return std.mem.splitScalar(u8, path[1..], '/');
 }
 
+pub fn pathLength(path: []const u8) usize {
+    var parts = splitPath(path);
+    var length: usize = 0;
+
+    inline while (parts.next()) |_|
+        length += 1;
+
+    return length;
+}
+
 pub fn paramType(comptime type_name: []const u8) type {
     if (std.mem.eql(u8, type_name, "u32")) {
         return u32;
@@ -18,40 +28,85 @@ pub fn paramType(comptime type_name: []const u8) type {
     }
 }
 
+pub fn stripError(comptime T: type) type {
+    return switch (@typeInfo(T)) {
+        .error_union => |info| info.payload,
+        else => T,
+    };
+}
+
+const TypeParser = struct {
+    fn @"[]u8"(src: []const u8) []const u8 {
+        return src;
+    }
+
+    fn @"u32"(src: []const u8) !u32 {
+        return std.fmt.parseInt(u32, src, 10);
+    }
+};
+
+pub fn parseType(comptime type_name: []const u8) type {
+    const method = @field(TypeParser, type_name);
+    switch (@typeInfo(@TypeOf(method))) {
+        .@"fn" => |f| {
+            const rt = f.return_type orelse @compileError("Function must return a type");
+            return stripError(rt);
+        },
+        else => @compileError("Expected a function type"),
+    }
+}
+
 pub fn patternType(comptime pattern: []const u8) type {
-    comptime var parts = splitPath(pattern);
-    comptime var fields: [100]std.builtin.Type.StructField = undefined;
-    comptime var index = 0;
-
-    inline while (parts.next()) |part| {
-        if (!std.mem.startsWith(u8, part, ":")) continue;
-        if (index >= fields.len)
-            @compileError("Too many path parameters");
-
-        const colon = std.mem.indexOfScalar(u8, part, ':') orelse
-            @compileError("Invalid path parameter format");
-
-        fields[index] = std.builtin.Type.StructField{
-            .name = part[0..colon],
-            .field_type = paramType(part[colon + 1 ..]),
+    comptime {
+        const proto = std.builtin.Type.StructField{
+            .name = "none",
+            .type = void,
             .default_value_ptr = null,
             .is_comptime = false,
             .alignment = 0,
         };
-        index += 1;
-    }
+        var parts = splitPath(pattern);
+        var fields: [100]std.builtin.Type.StructField = @splat(proto);
+        var index = 0;
 
-    return @Type(.{
-        .@"struct" = .{
-            .layout = .auto,
-            .fields = fields[0..index],
-            .decls = &[_]std.builtin.Type.Declaration{},
-            .is_tuple = false,
-        },
-    });
+        while (parts.next()) |part| {
+            if (!std.mem.startsWith(u8, part, ":")) continue;
+            if (index >= fields.len)
+                @compileError("Too many path parameters");
+
+            const tag = part[1..];
+
+            const colon = std.mem.indexOfScalar(u8, tag, ':') orelse
+                @compileError("Invalid path parameter format");
+
+            var name: [colon:0]u8 = @splat(' ');
+            for (name, 0..) |_, i| name[i] = tag[i];
+
+            fields[index] = std.builtin.Type.StructField{
+                .name = &name,
+                .type = parseType(tag[colon + 1 ..]),
+                .default_value_ptr = null,
+                .is_comptime = false,
+                .alignment = 0,
+            };
+            index += 1;
+        }
+
+        return @Type(.{
+            .@"struct" = .{
+                .layout = .auto,
+                .fields = fields[0..index],
+                .decls = &[_]std.builtin.Type.Declaration{},
+                .is_tuple = false,
+            },
+        });
+    }
 }
 
 pub fn matchPath(comptime pattern: []const u8, _: []const u8) ?patternType(pattern) {
+    // if (std.mem.eql(u8, path, "/user/:id:u32")) {
+    //     return UserId{ .id = 999 };
+    // }
     return null;
     // comptime var parts = splitPath(pattern);
     // var pit = splitPath(path);
@@ -83,28 +138,14 @@ pub fn matchPath(comptime pattern: []const u8, _: []const u8) ?patternType(patte
 }
 
 pub fn make_despatch(comptime T: type) type {
-    switch (@typeInfo(T)) {
-        .@"struct" => |info| {
-            inline for (info.decls) |decl| {
-                const name = decl.name;
-                const params = matchPath(name, path) orelse {
-                    @compileError("Path does not match any route");
-                };
-                const method = @field(T, name);
-                switch (@typeInfo(@TypeOf(method))) {
-                    .@"fn" => |f| {
-                        switch (f.params.len) {
-                            1 => method(self.router),
-                            2 => method(self.router, params),
-                            else => @compileError("Unexpected number of parameters"),
-                        }
-                    },
-                    else => @compileError("Expected a function type"),
-                }
-            }
-        },
-        else => @compileError("Expected a struct type for the router"),
-    }
+    // switch (@typeInfo(T)) {
+    //     .@"struct" => |info| {
+    //         inline for (info.decls) |decl| {
+    //             const name = decl.name;
+    //         }
+    //     },
+    //     else => @compileError("Expected a struct type for the router"),
+    // }
 
     return struct {
         router: T,
@@ -116,19 +157,18 @@ pub fn make_despatch(comptime T: type) type {
                     // std.debug.print("struct\n", .{});
                     inline for (info.decls) |decl| {
                         const name = decl.name;
-                        const params = matchPath(name, path) orelse {
-                            @compileError("Path does not match any route");
-                        };
-                        const method = @field(T, name);
-                        switch (@typeInfo(@TypeOf(method))) {
-                            .@"fn" => |f| {
-                                switch (f.params.len) {
-                                    1 => method(self.router),
-                                    2 => method(self.router, params),
-                                    else => @compileError("Unexpected number of parameters"),
-                                }
-                            },
-                            else => @compileError("Expected a function type"),
+                        if (matchPath(name, path)) |params| {
+                            const method = @field(T, name);
+                            switch (@typeInfo(@TypeOf(method))) {
+                                .@"fn" => |f| {
+                                    switch (f.params.len) {
+                                        1 => method(self.router),
+                                        2 => method(self.router, params),
+                                        else => @compileError("Unexpected number of parameters"),
+                                    }
+                                },
+                                else => @compileError("Expected a function type"),
+                            }
                         }
                     }
                 },
@@ -139,6 +179,8 @@ pub fn make_despatch(comptime T: type) type {
 }
 
 pub fn main() !void {
+    const info = patternType("/user/:id:u32/:name:[]u8"){ .id = 999, .name = "John Doe" };
+    std.debug.print("User ID: {d}, Name: {s}\n", .{ info.id, info.name });
     // Prints to stderr, ignoring potential errors.
     const Router = struct {
         const Self = @This();
@@ -147,7 +189,7 @@ pub fn main() !void {
             std.debug.print("Hello, world!\n", .{});
         }
 
-        pub fn @"/user/:id:u32"(_: Self, params: struct { id: u32 }) void {
+        pub fn @"/user/:id:u32"(_: Self, params: anytype) void {
             std.debug.print("user {d}\n", .{params.id});
         }
 
@@ -159,6 +201,6 @@ pub fn main() !void {
     const router = Router{};
     const despatch = Despatch{ .router = router };
     despatch.despatch("/user/:id:u32");
-    despatch.despatch("/index");
+    // despatch.despatch("/index");
     // router.@"/user/:id:u32"(.{ .id = 42 });
 }
