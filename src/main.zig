@@ -1,14 +1,36 @@
 const std = @import("std");
 
-pub fn isPath(str: []const u8) bool {
+fn isPath(str: []const u8) bool {
     return std.mem.startsWith(u8, str, "/");
 }
 
-pub fn pathIter(path: []const u8) std.mem.SplitIterator(u8, .scalar) {
+fn isParam(str: []const u8) bool {
+    return std.mem.startsWith(u8, str, ":");
+}
+
+fn pathIter(path: []const u8) std.mem.SplitIterator(u8, .scalar) {
     return std.mem.splitScalar(u8, path[1..], '/');
 }
 
-pub fn stripError(comptime T: type) type {
+fn pathCount(path: []const u8) usize {
+    var count: usize = 0;
+    var it = pathIter(path);
+    while (it.next()) |_| {
+        count += 1;
+    }
+    return count;
+}
+
+fn paramCount(path: []const u8) usize {
+    var count: usize = 0;
+    var it = pathIter(path);
+    while (it.next()) |part| {
+        if (isParam(part)) count += 1;
+    }
+    return count;
+}
+
+fn stripError(comptime T: type) type {
     return switch (@typeInfo(T)) {
         .error_union => |info| info.payload,
         else => T,
@@ -16,7 +38,7 @@ pub fn stripError(comptime T: type) type {
 }
 
 const TypeParser = struct {
-    fn @"[]u8"(src: []const u8) []const u8 {
+    fn @"[]u8"(src: []const u8) ![]const u8 {
         return src;
     }
 
@@ -25,7 +47,7 @@ const TypeParser = struct {
     }
 };
 
-pub fn parseType(comptime type_name: []const u8) type {
+fn parseType(comptime type_name: []const u8) type {
     const method = @field(TypeParser, type_name);
     switch (@typeInfo(@TypeOf(method))) {
         .@"fn" => |f| {
@@ -36,9 +58,9 @@ pub fn parseType(comptime type_name: []const u8) type {
     }
 }
 
-pub fn structField(comptime name: []const u8, comptime T: type) std.builtin.Type.StructField {
+fn structField(comptime name: []const u8, comptime T: type) std.builtin.Type.StructField {
     var z_name: [name.len:0]u8 = @splat(' ');
-    for (name, 0..) |_, i| z_name[i] = name[i];
+    @memcpy(&z_name, name);
     return .{
         .name = &z_name,
         .type = T,
@@ -48,18 +70,15 @@ pub fn structField(comptime name: []const u8, comptime T: type) std.builtin.Type
     };
 }
 
-pub fn patternType(comptime pattern: []const u8) type {
+fn routeType(comptime route: []const u8) type {
     comptime {
-        const proto = structField("none", void);
-        var parts = pathIter(pattern);
-        var fields: [100]std.builtin.Type.StructField = @splat(proto);
+        var it = pathIter(route);
+        const placebo = structField("placebo", void);
+        var fields: [paramCount(route)]std.builtin.Type.StructField = @splat(placebo);
         var index = 0;
 
-        while (parts.next()) |part| {
-            if (!std.mem.startsWith(u8, part, ":")) continue;
-            if (index >= fields.len)
-                @compileError("Too many path parameters");
-
+        while (it.next()) |part| {
+            if (!isParam(part)) continue;
             const tag = part[1..];
             const colon = std.mem.indexOfScalar(u8, tag, ':') orelse
                 @compileError("Invalid path parameter format");
@@ -70,7 +89,7 @@ pub fn patternType(comptime pattern: []const u8) type {
         return @Type(.{
             .@"struct" = .{
                 .layout = .auto,
-                .fields = fields[0..index],
+                .fields = &fields,
                 .decls = &[_]std.builtin.Type.Declaration{},
                 .is_tuple = false,
             },
@@ -78,140 +97,80 @@ pub fn patternType(comptime pattern: []const u8) type {
     }
 }
 
-pub fn matchPath(comptime pattern: []const u8, _: []const u8) ?patternType(pattern) {
-    // if (std.mem.eql(u8, path, "/user/:id:u32")) {
-    //     return UserId{ .id = 999 };
-    // }
-    return null;
-    // comptime var parts = splitPath(pattern);
-    // var pit = splitPath(path);
-    // var obj = patternType(pattern){};
-    // inline while (parts.next()) |patp| {
-    //     const pitp = pit.next();
-    //     if (pitp == null)
-    //         return null; // Path does not match
-    //     if (std.mem.startsWith(u8, patp, ":")) {
-    //         const colon = std.mem.indexOfScalar(u8, patp, ':') orelse {
-    //             @compileError("Invalid path parameter format");
-    //         };
-    //         const name = patp[0..colon];
-    //         const type_name = patp[colon + 1 ..];
-    //         if (std.mem.eql(u8, type_name, "u32")) {
-    //             @field(obj, name) = 0;
-    //         } else if (std.mem.eql(u8, type_name, "[]u8")) {
-    //             @field(obj, name) = pitp;
-    //         } else {
-    //             @compileError("Unsupported parameter type");
-    //         }
-    //     } else {
-    //         if (!std.mem.eql(u8, patp, pitp))
-    //             return null; // Path does not match
-    //     }
-    // }
+const Router = struct {
+    const Self = @This();
 
-    // return obj;
+    pub fn @"/index"(_: Self) void {
+        std.debug.print("Hello, world!\n", .{});
+    }
+
+    pub fn @"/user/:id:u32"(_: Self, params: anytype) void {
+        std.debug.print("user {d}\n", .{params.id});
+    }
+
+    // pub fn @"/tags/:tag:[]u8"(_: Self, params: struct { tag: []const u8 }) void {
+    //     std.debug.print("tag {s}\n", .{params.tag});
+    // }
+};
+
+inline fn parseParam(comptime tag: []const u8) struct { []const u8, []const u8 } {
+    comptime {
+        const colon = std.mem.indexOfScalar(u8, tag, ':') orelse
+            @compileError("No colon found in string");
+        return .{ tag[0..colon], tag[colon + 1 ..] };
+    }
 }
 
-pub fn makeMatcher(comptime pattern: []const u8) type {
+fn makeMatcher(comptime route: []const u8) type {
     comptime {
+        const ParamType = routeType(route);
+        const route_len = pathCount(route);
+        var r_parts: [route_len]struct { part: []const u8, is_parm: bool } = undefined;
+        var it = pathIter(route);
+        var index: usize = 0;
+
+        while (it.next()) |part| {
+            r_parts[index] = .{
+                .part = part,
+                .is_parm = isParam(part),
+            };
+            index += 1;
+        }
+
+        std.debug.assert(index == route_len);
+
         return struct {
-            const Self = @This();
-            const Params = patternType(pattern);
-
-            pub fn match(path: []const u8) ?Params {
-                const parts = pathIter(pattern);
-                var pit = pathIter(path);
-                var obj: Params = undefined;
-
-                inline while (parts.next()) |patp| {
-                    const pitp = pit.next();
-                    if (pitp == null) return null; // Path does not match
-
-                    if (std.mem.startsWith(u8, patp, ":")) {
-                        const colon = std.mem.indexOfScalar(u8, patp, ':') orelse {
-                            @compileError("Invalid path parameter format");
-                        };
-                        const name = patp[0..colon];
-                        const type_name = patp[colon + 1 ..];
-                        const value = pitp;
-
+            pub fn match(slot: *ParamType, path: []const u8) bool {
+                var p_it = pathIter(path);
+                inline for (r_parts) |r_part| {
+                    const p_part = p_it.next() orelse return false;
+                    if (r_part.is_parm) {
+                        const field_name, const type_name = parseParam(r_part.part[1..]);
                         const parser = @field(TypeParser, type_name);
-                        @field(obj, name) = parser(value);
-                    } else if (!std.mem.eql(u8, patp, pitp)) {
-                        return null; // Path does not match
+                        @field(slot, field_name) = parser(p_part) catch return false;
+                    } else {
+                        if (!std.mem.eql(u8, r_part.part, p_part)) return false;
                     }
                 }
-
-                return obj;
+                return true;
             }
         };
     }
 }
 
-pub fn makeDespatch(comptime T: type) type {
-    // switch (@typeInfo(T)) {
-    //     .@"struct" => |info| {
-    //         inline for (info.decls) |decl| {
-    //             const name = decl.name;
-    //         }
-    //     },
-    //     else => @compileError("Expected a struct type for the router"),
-    // }
-
-    return struct {
-        router: T,
-        const Self = @This();
-
-        pub fn despatch(self: Self, path: []const u8) void {
-            switch (@typeInfo(T)) {
-                .@"struct" => |info| {
-                    // std.debug.print("struct\n", .{});
-                    inline for (info.decls) |decl| {
-                        const name = decl.name;
-                        if (matchPath(name, path)) |params| {
-                            const method = @field(T, name);
-                            switch (@typeInfo(@TypeOf(method))) {
-                                .@"fn" => |f| {
-                                    switch (f.params.len) {
-                                        1 => method(self.router),
-                                        2 => method(self.router, params),
-                                        else => @compileError("Unexpected number of parameters"),
-                                    }
-                                },
-                                else => @compileError("Expected a function type"),
-                            }
-                        }
-                    }
-                },
-                else => @compileError("Expected a struct type for the router"),
-            }
-        }
-    };
-}
-
 pub fn main() !void {
-    const info = patternType("/user/:id:u32/name/:name:[]u8"){ .id = 999, .name = "John Doe" };
-    std.debug.print("User ID: {d}, Name: {s}\n", .{ info.id, info.name });
-    // Prints to stderr, ignoring potential errors.
-    const Router = struct {
-        const Self = @This();
+    // const user = routeType("/user/:id:u32/name/:name:[]u8"){ .id = 999, .name = "John Doe" };
+    // std.debug.print("User ID: {d}, Name: {s}\n", .{ user.id, user.name });
 
-        pub fn @"/index"(_: Self) void {
-            std.debug.print("Hello, world!\n", .{});
-        }
+    // const page = routeType("/page/:page:u32/:para:u32"){ .page = 1, .para = 42 };
+    // std.debug.print("Page: {d}, Para: {d}\n", .{ page.page, page.para });
 
-        pub fn @"/user/:id:u32"(_: Self, params: anytype) void {
-            std.debug.print("user {d}\n", .{params.id});
-        }
-
-        // pub fn @"/tags/:tag:[]u8"(_: Self, params: struct { tag: []const u8 }) void {
-        //     std.debug.print("tag {s}\n", .{params.tag});
-        // }
-    };
-    const Despatch = makeDespatch(Router);
-    const router = Router{};
-    const despatch = Despatch{ .router = router };
-    despatch.despatch("/user/:id:u32");
-    // despatch.despatch("/index");
-    // router.@"/user/:id:u32"(.{ .id = 42 });
+    const route = "/user/:id:u32/name/:name:[]u8";
+    const m = makeMatcher(route);
+    var slot: routeType(route) = undefined;
+    if (m.match(&slot, "/user/123/name/Andy")) {
+        std.debug.print("Matched user ID: {d}, Name: {s}\n", .{ slot.id, slot.name });
+    } else {
+        std.debug.print("No match found\n", .{});
+    }
 }
