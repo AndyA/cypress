@@ -97,22 +97,6 @@ fn routeType(comptime route: []const u8) type {
     }
 }
 
-const Router = struct {
-    const Self = @This();
-
-    pub fn @"/index"(_: Self) void {
-        std.debug.print("Hello, world!\n", .{});
-    }
-
-    pub fn @"/user/:id:u32"(_: Self, params: anytype) void {
-        std.debug.print("user {d}\n", .{params.id});
-    }
-
-    // pub fn @"/tags/:tag:[]u8"(_: Self, params: struct { tag: []const u8 }) void {
-    //     std.debug.print("tag {s}\n", .{params.tag});
-    // }
-};
-
 inline fn parseParam(comptime tag: []const u8) struct { []const u8, []const u8 } {
     comptime {
         const colon = std.mem.indexOfScalar(u8, tag, ':') orelse
@@ -158,6 +142,64 @@ fn makeMatcher(comptime route: []const u8) type {
     }
 }
 
+fn makeDespatcher(comptime router: anytype) type {
+    comptime {
+        switch (@typeInfo(@TypeOf(router))) {
+            .@"struct" => |info| {
+                var matchers: [info.decls.len]fn (path: []const u8) bool = undefined;
+                var index: usize = 0;
+                for (info.decls) |decl| {
+                    const pattern = decl.name;
+                    if (!isPath(pattern)) continue;
+                    const m = makeMatcher(pattern);
+                    const T = routeType(pattern);
+                    const shim = struct {
+                        pub fn match(path: []const u8) bool {
+                            var slot: T = undefined;
+                            if (m.match(&slot, path)) {
+                                std.debug.print("Matched {s}\n", .{pattern});
+                                const handler = @field(router, pattern);
+                                handler(&router, slot);
+                                return true;
+                            }
+                            return false;
+                        }
+                    };
+                    matchers[index] = shim.match;
+                    index += 1;
+                }
+
+                return struct {
+                    pub fn despatch(path: []const u8) void {
+                        inline for (matchers) |matcher| {
+                            if (matcher(path))
+                                return;
+                        }
+                        std.debug.print("No match found for {s}\n", .{path});
+                    }
+                };
+            },
+            else => @compileError("Expected a struct type"),
+        }
+    }
+}
+
+const Router = struct {
+    const Self = @This();
+
+    pub fn @"/index"(_: *Self) void {
+        std.debug.print("Hello, world!\n", .{});
+    }
+
+    pub fn @"/user/:id:u32"(_: *Self, params: anytype) void {
+        std.debug.print("user {d}\n", .{params.id});
+    }
+
+    // pub fn @"/tags/:tag:[]u8"(_: Self, params: struct { tag: []const u8 }) void {
+    //     std.debug.print("tag {s}\n", .{params.tag});
+    // }
+};
+
 pub fn main() !void {
     // const user = routeType("/user/:id:u32/name/:name:[]u8"){ .id = 999, .name = "John Doe" };
     // std.debug.print("User ID: {d}, Name: {s}\n", .{ user.id, user.name });
@@ -173,4 +215,9 @@ pub fn main() !void {
     } else {
         std.debug.print("No match found\n", .{});
     }
+
+    const router = Router{};
+    const despatcher = makeDespatcher(router);
+    despatcher.despatch("/index");
+    despatcher.despatch("/user/42");
 }
