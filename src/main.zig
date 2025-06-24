@@ -144,7 +144,8 @@ fn makeMatcher(comptime route: []const u8) type {
 
 fn makeDespatcher(comptime router: anytype) type {
     comptime {
-        switch (@typeInfo(@TypeOf(router))) {
+        const RT = @TypeOf(router);
+        switch (@typeInfo(RT)) {
             .@"struct" => |info| {
                 var matchers: [info.decls.len]fn (path: []const u8) bool = undefined;
                 var index: usize = 0;
@@ -157,9 +158,17 @@ fn makeDespatcher(comptime router: anytype) type {
                         pub fn match(path: []const u8) bool {
                             var slot: T = undefined;
                             if (m.match(&slot, path)) {
-                                std.debug.print("Matched {s}\n", .{pattern});
-                                const handler = @field(router, pattern);
-                                handler(&router, slot);
+                                const method = @field(RT, pattern);
+                                switch (@typeInfo(@TypeOf(method))) {
+                                    .@"fn" => |f| {
+                                        switch (f.params.len) {
+                                            1 => method(router),
+                                            2 => method(router, slot),
+                                            else => @compileError("Unexpected number of parameters"),
+                                        }
+                                    },
+                                    else => @compileError("Expected a function type"),
+                                }
                                 return true;
                             }
                             return false;
@@ -187,12 +196,12 @@ fn makeDespatcher(comptime router: anytype) type {
 const Router = struct {
     const Self = @This();
 
-    pub fn @"/index"(_: *Self) void {
+    pub fn @"/index"(_: Self, _: anytype) void {
         std.debug.print("Hello, world!\n", .{});
     }
 
-    pub fn @"/user/:id:u32"(_: *Self, params: anytype) void {
-        std.debug.print("user {d}\n", .{params.id});
+    pub fn @"/user/:id:u32/name/:name:[]u8"(_: Self, params: anytype) void {
+        std.debug.print("user {d} {s}\n", .{ params.id, params.name });
     }
 
     // pub fn @"/tags/:tag:[]u8"(_: Self, params: struct { tag: []const u8 }) void {
@@ -201,23 +210,8 @@ const Router = struct {
 };
 
 pub fn main() !void {
-    // const user = routeType("/user/:id:u32/name/:name:[]u8"){ .id = 999, .name = "John Doe" };
-    // std.debug.print("User ID: {d}, Name: {s}\n", .{ user.id, user.name });
-
-    // const page = routeType("/page/:page:u32/:para:u32"){ .page = 1, .para = 42 };
-    // std.debug.print("Page: {d}, Para: {d}\n", .{ page.page, page.para });
-
-    const route = "/user/:id:u32/name/:name:[]u8";
-    const m = makeMatcher(route);
-    var slot: routeType(route) = undefined;
-    if (m.match(&slot, "/user/123/name/Andy")) {
-        std.debug.print("Matched user ID: {d}, Name: {s}\n", .{ slot.id, slot.name });
-    } else {
-        std.debug.print("No match found\n", .{});
-    }
-
     const router = Router{};
     const despatcher = makeDespatcher(router);
     despatcher.despatch("/index");
-    despatcher.despatch("/user/42");
+    despatcher.despatch("/user/42/name/Andy");
 }
