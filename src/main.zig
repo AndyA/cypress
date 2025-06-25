@@ -38,7 +38,7 @@ fn stripError(comptime T: type) type {
 }
 
 fn parseType(comptime type_name: []const u8) type {
-    const method = @field(TypeParser, type_name);
+    const method = @field(PathParser, type_name);
     switch (@typeInfo(@TypeOf(method))) {
         .@"fn" => |f| {
             const rt = f.return_type orelse @compileError("Function must return a type");
@@ -122,7 +122,7 @@ fn makeMatcher(comptime route: []const u8) type {
                     const path_part = path_it.next() orelse return false;
                     if (route_part.is_parm) {
                         const field_name, const type_name = parseParam(route_part.part[1..]);
-                        const parser = @field(TypeParser, type_name);
+                        const parser = @field(PathParser, type_name);
                         @field(params, field_name) = try parser(path_part);
                     } else {
                         if (!std.mem.eql(u8, route_part.part, path_part)) return false;
@@ -134,7 +134,7 @@ fn makeMatcher(comptime route: []const u8) type {
     }
 }
 
-fn makeDespatcher(comptime router: anytype) type {
+fn makeRouter(comptime router: anytype) type {
     comptime {
         const RT = @TypeOf(router);
         switch (@typeInfo(RT)) {
@@ -184,7 +184,7 @@ fn makeDespatcher(comptime router: anytype) type {
     }
 }
 
-const TypeParser = struct {
+const PathParser = struct {
     fn @"[]u8"(src: []const u8) ![]const u8 {
         return src;
     }
@@ -194,12 +194,12 @@ const TypeParser = struct {
     }
 };
 
-const Router = struct {
-    app: []const u8,
+const App = struct {
+    name: []const u8,
     const Self = @This();
 
     fn header(self: Self) void {
-        std.debug.print("[{s}] ", .{self.app});
+        std.debug.print("[{s}] ", .{self.name});
     }
 
     pub fn @"/index"(self: Self) !void {
@@ -227,10 +227,10 @@ const urls = [_][]const u8{
 };
 
 pub fn main() !void {
-    const router = Router{ .app = "cypress" };
-    const despatcher = makeDespatcher(router);
+    const app = App{ .name = "cypress" };
+    const router = makeRouter(app);
     for (urls) |url| {
-        if (!try despatcher.despatch(url)) {
+        if (!try router.despatch(url)) {
             std.debug.print("No route found for {s}\n", .{url});
         }
     }
