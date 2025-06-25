@@ -37,16 +37,6 @@ fn stripError(comptime T: type) type {
     };
 }
 
-const TypeParser = struct {
-    fn @"[]u8"(src: []const u8) ![]const u8 {
-        return src;
-    }
-
-    fn @"u32"(src: []const u8) !u32 {
-        return std.fmt.parseInt(u32, src, 10);
-    }
-};
-
 fn parseType(comptime type_name: []const u8) type {
     const method = @field(TypeParser, type_name);
     switch (@typeInfo(@TypeOf(method))) {
@@ -70,7 +60,15 @@ fn structField(comptime name: []const u8, comptime T: type) std.builtin.Type.Str
     };
 }
 
-fn routeType(comptime route: []const u8) type {
+inline fn parseParam(comptime tag: []const u8) struct { []const u8, []const u8 } {
+    comptime {
+        const colon = std.mem.indexOfScalar(u8, tag, ':') orelse
+            @compileError("No colon found in string");
+        return .{ tag[0..colon], tag[colon + 1 ..] };
+    }
+}
+
+fn routeParamType(comptime route: []const u8) type {
     comptime {
         var it = pathIter(route);
         const placebo = structField("placebo", void);
@@ -79,12 +77,12 @@ fn routeType(comptime route: []const u8) type {
 
         while (it.next()) |part| {
             if (!isParam(part)) continue;
-            const tag = part[1..];
-            const colon = std.mem.indexOfScalar(u8, tag, ':') orelse
-                @compileError("Invalid path parameter format");
-            fields[index] = structField(tag[0..colon], parseType(tag[colon + 1 ..]));
+            const field_name, const type_name = parseParam(part[1..]);
+            fields[index] = structField(field_name, parseType(type_name));
             index += 1;
         }
+
+        if (index == 0) return void;
 
         return @Type(.{
             .@"struct" = .{
@@ -97,24 +95,16 @@ fn routeType(comptime route: []const u8) type {
     }
 }
 
-inline fn parseParam(comptime tag: []const u8) struct { []const u8, []const u8 } {
-    comptime {
-        const colon = std.mem.indexOfScalar(u8, tag, ':') orelse
-            @compileError("No colon found in string");
-        return .{ tag[0..colon], tag[colon + 1 ..] };
-    }
-}
-
 fn makeMatcher(comptime route: []const u8) type {
     comptime {
-        const ParamType = routeType(route);
+        const ParamType = routeParamType(route);
         const route_len = pathCount(route);
-        var r_parts: [route_len]struct { part: []const u8, is_parm: bool } = undefined;
+        var route_parts: [route_len]struct { part: []const u8, is_parm: bool } = undefined;
         var it = pathIter(route);
         var index: usize = 0;
 
         while (it.next()) |part| {
-            r_parts[index] = .{
+            route_parts[index] = .{
                 .part = part,
                 .is_parm = isParam(part),
             };
@@ -124,16 +114,16 @@ fn makeMatcher(comptime route: []const u8) type {
         std.debug.assert(index == route_len);
 
         return struct {
-            pub fn match(slot: *ParamType, path: []const u8) bool {
-                var p_it = pathIter(path);
-                inline for (r_parts) |r_part| {
-                    const p_part = p_it.next() orelse return false;
-                    if (r_part.is_parm) {
-                        const field_name, const type_name = parseParam(r_part.part[1..]);
+            pub fn match(params: *ParamType, path: []const u8) !bool {
+                var path_it = pathIter(path);
+                inline for (route_parts) |route_part| {
+                    const path_part = path_it.next() orelse return false;
+                    if (route_part.is_parm) {
+                        const field_name, const type_name = parseParam(route_part.part[1..]);
                         const parser = @field(TypeParser, type_name);
-                        @field(slot, field_name) = parser(p_part) catch return false;
+                        @field(params, field_name) = try parser(path_part);
                     } else {
-                        if (!std.mem.eql(u8, r_part.part, p_part)) return false;
+                        if (!std.mem.eql(u8, route_part.part, path_part)) return false;
                     }
                 }
                 return true;
@@ -147,27 +137,23 @@ fn makeDespatcher(comptime router: anytype) type {
         const RT = @TypeOf(router);
         switch (@typeInfo(RT)) {
             .@"struct" => |info| {
-                var matchers: [info.decls.len]fn (path: []const u8) bool = undefined;
+                var matchers: [info.decls.len]fn (path: []const u8) anyerror!bool = undefined;
                 var index: usize = 0;
+
                 for (info.decls) |decl| {
                     const pattern = decl.name;
                     if (!isPath(pattern)) continue;
-                    const m = makeMatcher(pattern);
-                    const T = routeType(pattern);
+                    const matcher = makeMatcher(pattern);
+                    const ParamType = routeParamType(pattern);
                     const shim = struct {
-                        pub fn match(path: []const u8) bool {
-                            var slot: T = undefined;
-                            if (m.match(&slot, path)) {
+                        pub fn match(path: []const u8) !bool {
+                            var params: ParamType = undefined;
+                            if (try matcher.match(&params, path)) {
                                 const method = @field(RT, pattern);
-                                switch (@typeInfo(@TypeOf(method))) {
-                                    .@"fn" => |f| {
-                                        switch (f.params.len) {
-                                            1 => method(router),
-                                            2 => method(router, slot),
-                                            else => @compileError("Unexpected number of parameters"),
-                                        }
-                                    },
-                                    else => @compileError("Expected a function type"),
+                                if (ParamType == void) {
+                                    try method(router);
+                                } else {
+                                    try method(router, params);
                                 }
                                 return true;
                             }
@@ -178,13 +164,16 @@ fn makeDespatcher(comptime router: anytype) type {
                     index += 1;
                 }
 
+                if (index == 0)
+                    @compileError("No valid routes found in the router");
+
                 return struct {
-                    pub fn despatch(path: []const u8) void {
+                    pub fn despatch(path: []const u8) !bool {
                         inline for (matchers) |matcher| {
-                            if (matcher(path))
-                                return;
+                            if (try matcher(path))
+                                return true;
                         }
-                        std.debug.print("No match found for {s}\n", .{path});
+                        return false;
                     }
                 };
             },
@@ -193,25 +182,54 @@ fn makeDespatcher(comptime router: anytype) type {
     }
 }
 
+const TypeParser = struct {
+    fn @"[]u8"(src: []const u8) ![]const u8 {
+        return src;
+    }
+
+    fn @"u32"(src: []const u8) !u32 {
+        return std.fmt.parseInt(u32, src, 10);
+    }
+};
+
 const Router = struct {
+    app: []const u8,
     const Self = @This();
 
-    pub fn @"/index"(_: Self, _: anytype) void {
+    fn header(self: Self) void {
+        std.debug.print("[{s}] ", .{self.app});
+    }
+
+    pub fn @"/index"(self: Self) !void {
+        self.header();
         std.debug.print("Hello, world!\n", .{});
     }
 
-    pub fn @"/user/:id:u32/name/:name:[]u8"(_: Self, params: anytype) void {
+    pub fn @"/user/:id:u32/name/:name:[]u8"(self: Self, params: anytype) !void {
+        self.header();
         std.debug.print("user {d} {s}\n", .{ params.id, params.name });
     }
 
-    // pub fn @"/tags/:tag:[]u8"(_: Self, params: struct { tag: []const u8 }) void {
-    //     std.debug.print("tag {s}\n", .{params.tag});
-    // }
+    pub fn @"/tags/:tag:[]u8"(self: Self, params: anytype) !void {
+        self.header();
+        std.debug.print("tag {s}\n", .{params.tag});
+    }
+};
+
+const urls = [_][]const u8{
+    "/index",
+    "/user/42/name/Andy",
+    "/user/999/name/Smoo",
+    "/tags/fishing",
+    "/foo/bar/123",
 };
 
 pub fn main() !void {
-    const router = Router{};
+    const router = Router{ .app = "cypress" };
     const despatcher = makeDespatcher(router);
-    despatcher.despatch("/index");
-    despatcher.despatch("/user/42/name/Andy");
+    for (urls) |url| {
+        if (!try despatcher.despatch(url)) {
+            std.debug.print("No route found for {s}\n", .{url});
+        }
+    }
 }
