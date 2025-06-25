@@ -70,10 +70,14 @@ inline fn parseParam(comptime tag: []const u8) struct { []const u8, []const u8 }
 
 fn routeParamType(comptime route: []const u8) type {
     comptime {
-        var it = pathIter(route);
+        const params = paramCount(route);
+
+        if (params == 0) return void;
+
         const placebo = structField("placebo", void);
-        var fields: [paramCount(route)]std.builtin.Type.StructField = @splat(placebo);
+        var fields: [params]std.builtin.Type.StructField = @splat(placebo);
         var index = 0;
+        var it = pathIter(route);
 
         while (it.next()) |part| {
             if (!isParam(part)) continue;
@@ -81,8 +85,6 @@ fn routeParamType(comptime route: []const u8) type {
             fields[index] = structField(field_name, parseType(type_name));
             index += 1;
         }
-
-        if (index == 0) return void;
 
         return @Type(.{
             .@"struct" = .{
