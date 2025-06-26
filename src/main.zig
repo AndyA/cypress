@@ -154,7 +154,14 @@ fn makeRouter(comptime router: anytype) type {
         const RT = @TypeOf(router);
         switch (@typeInfo(RT)) {
             .@"struct" => |info| {
-                var matchers: [info.decls.len]fn (path: []const u8) anyerror!bool = undefined;
+                var count: usize = 0;
+                for (info.decls) |decl| {
+                    if (isPath(decl.name)) count += 1;
+                }
+                if (count == 0)
+                    @compileError("No valid routes found in the router");
+
+                var matchers: [count]fn (path: []const u8) anyerror!bool = undefined;
                 var index: usize = 0;
 
                 for (info.decls) |decl| {
@@ -181,8 +188,7 @@ fn makeRouter(comptime router: anytype) type {
                     index += 1;
                 }
 
-                if (index == 0)
-                    @compileError("No valid routes found in the router");
+                std.debug.assert(index == count);
 
                 return struct {
                     pub fn despatch(path: []const u8) !bool {
@@ -228,22 +234,27 @@ const App = struct {
 
     pub fn @"/user/:id:u32/name/:name:[]u8"(self: Self, params: anytype) !void {
         self.header();
-        std.debug.print("user {d} {s}\n", .{ params.id, params.name });
+        std.debug.print("user id {d}, name \"{s}\"\n", .{ params.id, params.name });
     }
 
     pub fn @"/tags/:tag:[]u8"(self: Self, params: anytype) !void {
         self.header();
-        std.debug.print("tag {s}\n", .{params.tag});
+        std.debug.print("tag \"{s}\"\n", .{params.tag});
     }
 
-    pub fn @"/foo/:id:[]u8/123"(self: Self, params: anytype) !void {
+    pub fn @"/tags/:tag:[]u8/:page:u32"(self: Self, params: anytype) !void {
         self.header();
-        std.debug.print("foo {s}\n", .{params.id});
+        std.debug.print("tag \"{s}\", page {d}\n", .{ params.tag, params.page });
     }
 
-    pub fn @"/space/:x:f64/:y:f64/:z:f64"(self: Self, params: anytype) !void {
+    pub fn @"/map/tile/:x:f64/:y:f64/:zoom:u32/:label:[]u8"(self: Self, params: anytype) !void {
         self.header();
-        std.debug.print("space {d} {d} {d}\n", .{ params.x, params.y, params.z });
+        std.debug.print("tile at {d}, {d}, zoom {d}, label \"{s}\"\n", .{
+            params.x,
+            params.y,
+            params.zoom,
+            params.label,
+        });
     }
 };
 
@@ -252,13 +263,16 @@ const urls = [_][]const u8{
     "/user/42/name/Andy",
     "/user/999/name/Smoo",
     "/tags/fishing",
-    "/foo/bar/123",
-    "/space/-1/3/2.5",
+    "/tags/fishing/1",
+    "/tags/fishing/2",
+    "/tags/fishing/3",
+    "/map/tile/57.293/-1.535/3/home",
+    "/foo/bar/123/456",
 };
 
 pub fn main() !void {
     const app = App{ .name = "cypress" };
-    // @setEvalBranchQuota(2000);
+    @setEvalBranchQuota(2000);
 
     const router = makeRouter(app);
     for (urls) |url| {
